@@ -1,1 +1,408 @@
-fdefdsfdsfdfewfewdfsefe
+import React, { useState, useEffect, useMemo } from 'react';
+import { initializeApp } from 'firebase/app';
+import { 
+  getAuth, 
+  signInAnonymously, 
+  signInWithCustomToken, 
+  onAuthStateChanged,
+  GoogleAuthProvider,
+  signInWithPopup,
+  signOut
+} from 'firebase/auth';
+import { 
+  getFirestore, 
+  collection, 
+  doc, 
+  addDoc, 
+  deleteDoc, 
+  onSnapshot, 
+  query,
+  setDoc
+} from 'firebase/firestore';
+import { 
+  Plus, 
+  Trash2, 
+  TrendingUp, 
+  DollarSign, 
+  Star, 
+  Image as ImageIcon, 
+  Search, 
+  LayoutGrid, 
+  PieChart, 
+  Package,
+  X,
+  Upload,
+  Edit2,
+  LogOut,
+  LogIn
+} from 'lucide-react';
+
+// --- Firebase 配置 (使用您提供的資訊) ---
+const firebaseConfig = {
+  apiKey: "AIzaSyAZ_qGlg1DK6DXmRN7Bkfj5DngJdQKYJ2I",
+  authDomain: "collector-5655b.firebaseapp.com",
+  projectId: "collector-5655b",
+  storageBucket: "collector-5655b.firebasestorage.app",
+  messagingSenderId: "678793560741",
+  appId: "1:678793560741:web:348c114ac69d4a5fa2834c",
+  measurementId: "G-0ZKTDDCTKW"
+};
+
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getFirestore(app);
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'collector-5655b';
+
+export default function App() {
+  const [items, setItems] = useState([]);
+  const [user, setUser] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [searchTerm, setSearchTerm] = useState('');
+  const [isModalOpen, setIsModalOpen] = useState(false);
+  const [isAuthLoading, setIsAuthLoading] = useState(false);
+  
+  const [formData, setFormData] = useState({
+    name: '',
+    price: '',
+    rating: 5,
+    category: '一般',
+    image: '',
+    description: ''
+  });
+
+  // 1. 驗證邏輯 (支援 Google 登入與匿名 fallback)
+  useEffect(() => {
+    const initAuth = async () => {
+      try {
+        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+          await signInWithCustomToken(auth, __initial_auth_token);
+        } else if (!auth.currentUser) {
+          await signInAnonymously(auth);
+        }
+      } catch (error) {
+        console.error("驗證引發錯誤:", error);
+      }
+    };
+    initAuth();
+    
+    const unsubscribeAuth = onAuthStateChanged(auth, (u) => {
+      setUser(u);
+      setLoading(false);
+    });
+    return () => unsubscribeAuth();
+  }, []);
+
+  // 2. 數據監聽 (使用符合 Rules 的路徑: /artifacts/{appId}/public/data/collections)
+  useEffect(() => {
+    if (!user) return;
+
+    // 依照規則路徑定義 Collection
+    const collectionRef = collection(db, 'artifacts', appId, 'public', 'data', 'collections');
+    
+    const unsubscribeData = onSnapshot(collectionRef, 
+      (snapshot) => {
+        const data = snapshot.docs.map(doc => ({
+          id: doc.id,
+          ...doc.data()
+        }));
+        setItems(data);
+      }, 
+      (error) => {
+        console.error("Firestore 資料存取錯誤:", error);
+      }
+    );
+
+    return () => unsubscribeData();
+  }, [user]);
+
+  // Google 登入功能
+  const handleGoogleLogin = async () => {
+    setIsAuthLoading(true);
+    const provider = new GoogleAuthProvider();
+    try {
+      await signInWithPopup(auth, provider);
+    } catch (error) {
+      console.error("Google 登入失敗:", error);
+    } finally {
+      setIsAuthLoading(false);
+    }
+  };
+
+  const handleLogout = () => signOut(auth);
+
+  // 3. 數據統計
+  const stats = useMemo(() => {
+    const totalValue = items.reduce((sum, item) => sum + (Number(item.price) || 0), 0);
+    const avgRating = items.length ? (items.reduce((sum, item) => sum + item.rating, 0) / items.length).toFixed(1) : 0;
+    const categories = [...new Set(items.map(i => i.category))].length;
+    return { totalValue, avgRating, totalItems: items.length, categories };
+  }, [items]);
+
+  const filteredItems = items.filter(item => 
+    item.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
+    item.category.toLowerCase().includes(searchTerm.toLowerCase())
+  );
+
+  // 4. 新增收藏 (包含 Base64 圖片)
+  const handleAddItem = async (e) => {
+    e.preventDefault();
+    if (!user) return;
+
+    try {
+      const collectionRef = collection(db, 'artifacts', appId, 'public', 'data', 'collections');
+      await addDoc(collectionRef, {
+        ...formData,
+        price: Number(formData.price),
+        ownerId: user.uid,
+        ownerName: user.displayName || '匿名收藏家',
+        createdAt: new Date().toISOString()
+      });
+      setIsModalOpen(false);
+      setFormData({ name: '', price: '', rating: 5, category: '一般', image: '', description: '' });
+    } catch (error) {
+      console.error("新增失敗: ", error);
+    }
+  };
+
+  const handleDelete = async (id) => {
+    if (!user) return;
+    try {
+      await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'collections', id));
+    } catch (error) {
+      console.error("刪除失敗: ", error);
+    }
+  };
+
+  const handleImageUpload = (e) => {
+    const file = e.target.files[0];
+    if (file) {
+      // 限制圖片大小以符合 Firestore 1MB 限制 (Base64 會增加約 33% 大小)
+      if (file.size > 700000) { 
+        alert("圖片過大，請選擇小於 700KB 的圖片以確保順利儲存。");
+        return;
+      }
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        setFormData(prev => ({ ...prev, image: reader.result }));
+      };
+      reader.readAsDataURL(file);
+    }
+  };
+
+  if (loading) {
+    return (
+      <div className="flex h-screen items-center justify-center bg-slate-50">
+        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-indigo-600"></div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-h-screen bg-[#F8FAFC] text-slate-900 font-sans">
+      {/* 導覽列 */}
+      <nav className="fixed top-0 left-0 right-0 h-16 bg-white/80 backdrop-blur-md border-b border-slate-200 z-40 px-6 flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <div className="w-10 h-10 bg-indigo-600 rounded-xl flex items-center justify-center text-white shadow-lg">
+            <Package size={24} />
+          </div>
+          <h1 className="text-xl font-bold tracking-tight text-slate-800 hidden md:block">雲端收藏庫</h1>
+        </div>
+
+        <div className="flex items-center gap-4 flex-1 max-w-md mx-4">
+          <div className="relative w-full">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={18} />
+            <input 
+              type="text" 
+              placeholder="搜尋名稱或類別..."
+              className="w-full pl-10 pr-4 py-2 bg-slate-100 border-none rounded-full text-sm focus:ring-2 focus:ring-indigo-500 transition-all outline-none"
+              value={searchTerm}
+              onChange={(e) => setSearchTerm(e.target.value)}
+            />
+          </div>
+        </div>
+
+        <div className="flex items-center gap-3">
+          {user && !user.isAnonymous ? (
+            <div className="flex items-center gap-3">
+              <div className="text-right hidden sm:block">
+                <p className="text-xs font-bold text-slate-800">{user.displayName}</p>
+                <p className="text-[10px] text-slate-400">Google 登入</p>
+              </div>
+              <button onClick={handleLogout} className="p-2 text-slate-400 hover:text-red-500 transition-colors">
+                <LogOut size={20} />
+              </button>
+            </div>
+          ) : (
+            <button 
+              onClick={handleGoogleLogin}
+              disabled={isAuthLoading}
+              className="flex items-center gap-2 bg-white border border-slate-200 px-3 py-2 rounded-lg text-sm font-medium hover:bg-slate-50 transition-colors"
+            >
+              <LogIn size={16} />
+              Google 登入
+            </button>
+          )}
+          <button 
+            onClick={() => setIsModalOpen(true)}
+            className="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded-lg flex items-center gap-2 text-sm font-medium transition-all shadow-md active:scale-95"
+          >
+            <Plus size={18} />
+            <span className="hidden sm:inline">新增</span>
+          </button>
+        </div>
+      </nav>
+
+      {/* 數據內容 */}
+      <main className="pt-24 pb-12 px-6 max-w-7xl mx-auto">
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-6 mb-10">
+          <StatCard title="資產總估值" value={`$${stats.totalValue.toLocaleString()}`} icon={<DollarSign className="text-emerald-500" />} color="bg-emerald-50" />
+          <StatCard title="典藏數量" value={stats.totalItems} icon={<Package className="text-blue-500" />} color="bg-blue-50" />
+          <StatCard title="平均喜愛度" value={stats.avgRating} icon={<Star className="text-amber-500" />} color="bg-amber-50" />
+          <StatCard title="分類多樣性" value={stats.categories} icon={<PieChart className="text-purple-500" />} color="bg-purple-50" />
+        </div>
+
+        <div className="flex items-center justify-between mb-6">
+          <h2 className="text-lg font-bold text-slate-800">全體收藏 ({filteredItems.length})</h2>
+          {user?.isAnonymous && (
+            <span className="text-xs bg-amber-100 text-amber-700 px-2 py-1 rounded-md font-medium">
+              訪客模式：登入 Google 即可同步您的名稱
+            </span>
+          )}
+        </div>
+
+        {filteredItems.length === 0 ? (
+          <div className="flex flex-col items-center justify-center py-20 bg-white rounded-3xl border-2 border-dashed border-slate-200">
+            <ImageIcon size={48} className="text-slate-200 mb-4" />
+            <p className="text-slate-400">目前沒有找到任何收藏項目</p>
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
+            {filteredItems.map(item => (
+              <CollectionCard key={item.id} item={item} onDelete={() => handleDelete(item.id)} />
+            ))}
+          </div>
+        )}
+      </main>
+
+      {/* 新增 Modal */}
+      {isModalOpen && (
+        <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-3xl w-full max-w-xl shadow-2xl animate-in fade-in zoom-in duration-200 overflow-hidden">
+            <div className="p-6 border-b border-slate-100 flex justify-between items-center">
+              <h3 className="text-xl font-bold">新增收藏項目</h3>
+              <button onClick={() => setIsModalOpen(false)} className="p-2 hover:bg-slate-100 rounded-full text-slate-400 transition-colors">
+                <X size={20} />
+              </button>
+            </div>
+            
+            <form onSubmit={handleAddItem} className="p-6 space-y-4 max-h-[80vh] overflow-y-auto">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div className="sm:col-span-2">
+                  <label className="text-xs font-bold text-slate-500 mb-1 block">項目名稱</label>
+                  <input required className="w-full p-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none" placeholder="輸入名稱..." value={formData.name} onChange={e => setFormData({...formData, name: e.target.value})} />
+                </div>
+                <div>
+                  <label className="text-xs font-bold text-slate-500 mb-1 block">預估價值 (TWD)</label>
+                  <input type="number" className="w-full p-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none" placeholder="0" value={formData.price} onChange={e => setFormData({...formData, price: e.target.value})} />
+                </div>
+                <div>
+                  <label className="text-xs font-bold text-slate-500 mb-1 block">分類</label>
+                  <select className="w-full p-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none" value={formData.category} onChange={e => setFormData({...formData, category: e.target.value})}>
+                    <option>一般</option>
+                    <option>藝術</option>
+                    <option>電子產品</option>
+                    <option>時尚</option>
+                    <option>收藏品</option>
+                    <option>奢侈品</option>
+                  </select>
+                </div>
+              </div>
+
+              <div>
+                <label className="text-xs font-bold text-slate-500 mb-2 block">喜愛程度</label>
+                <div className="flex gap-2">
+                  {[1, 2, 3, 4, 5].map(s => (
+                    <button key={s} type="button" onClick={() => setFormData({...formData, rating: s})} className={`p-2 rounded-lg transition-all ${formData.rating >= s ? 'text-amber-500 bg-amber-50' : 'text-slate-300'}`}>
+                      <Star fill={formData.rating >= s ? 'currentColor' : 'none'} size={20} />
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div>
+                <label className="text-xs font-bold text-slate-500 mb-2 block">上傳圖片 (Base64)</label>
+                <div className="border-2 border-dashed border-slate-200 rounded-2xl p-4 hover:border-indigo-400 transition-colors text-center relative group">
+                  <input type="file" accept="image/*" onChange={handleImageUpload} className="absolute inset-0 opacity-0 cursor-pointer" />
+                  {formData.image ? (
+                    <div className="h-32 w-full flex items-center justify-center">
+                      <img src={formData.image} alt="Preview" className="h-full object-contain rounded-lg" />
+                    </div>
+                  ) : (
+                    <div className="py-4 text-slate-400">
+                      <Upload className="mx-auto mb-2" />
+                      <p className="text-sm">點擊上傳圖片</p>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              <button type="submit" className="w-full bg-indigo-600 hover:bg-indigo-700 text-white py-4 rounded-2xl font-bold text-lg shadow-lg shadow-indigo-100 transition-all active:scale-95">
+                建立收藏
+              </button>
+            </form>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function StatCard({ title, value, icon, color }) {
+  return (
+    <div className="bg-white p-6 rounded-3xl border border-slate-100 shadow-sm">
+      <div className={`w-10 h-10 rounded-xl ${color} flex items-center justify-center mb-4`}>
+        {icon}
+      </div>
+      <h4 className="text-slate-500 text-xs font-bold uppercase tracking-wider">{title}</h4>
+      <p className="text-2xl font-black text-slate-800 mt-1">{value}</p>
+    </div>
+  );
+}
+
+function CollectionCard({ item, onDelete }) {
+  return (
+    <div className="group bg-white rounded-3xl border border-slate-100 shadow-sm overflow-hidden hover:shadow-xl transition-all duration-300">
+      <div className="aspect-square bg-slate-50 relative">
+        {item.image ? (
+          <img src={item.image} alt={item.name} className="w-full h-full object-cover" />
+        ) : (
+          <div className="w-full h-full flex items-center justify-center text-slate-200">
+            <ImageIcon size={48} />
+          </div>
+        )}
+        <div className="absolute top-3 left-3 px-2 py-1 bg-white/90 backdrop-blur rounded-lg text-[10px] font-bold shadow-sm">
+          {item.category}
+        </div>
+        <button onClick={() => onDelete(item.id)} className="absolute top-3 right-3 p-2 bg-white/90 backdrop-blur text-slate-400 hover:text-red-500 rounded-full opacity-0 group-hover:opacity-100 transition-all shadow-sm">
+          <Trash2 size={16} />
+        </button>
+      </div>
+      <div className="p-5">
+        <div className="flex justify-between items-start mb-1">
+          <h3 className="font-bold text-slate-800 truncate">{item.name}</h3>
+          <div className="flex items-center text-amber-500">
+            <Star size={12} fill="currentColor" />
+            <span className="text-xs font-bold ml-1">{item.rating}</span>
+          </div>
+        </div>
+        <div className="mt-4 pt-4 border-t border-slate-50 flex justify-between items-center">
+          <div>
+            <p className="text-[10px] text-slate-400 font-bold uppercase">預估價值</p>
+            <p className="text-lg font-black text-indigo-600">${Number(item.price).toLocaleString()}</p>
+          </div>
+          <p className="text-[10px] text-slate-300 italic">By {item.ownerName || 'Unknown'}</p>
+        </div>
+      </div>
+    </div>
+  );
+}
